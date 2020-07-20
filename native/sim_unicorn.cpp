@@ -302,6 +302,7 @@ typedef struct mem_access {
 	uint8_t value[MAX_MEM_ACCESS_SIZE]; // assume size of any memory write is no more than 8
 	int size;
 	int clean; // save current page bitmap
+	bool is_symbolic;
 } mem_access_t; // actually it should be `mem_write_t` :)
 
 typedef struct mem_update {
@@ -681,12 +682,13 @@ public:
 	/*
 	 * record current memory write
 	 */
-	bool log_write(address_t address, int size, int clean) {
+	bool log_write(address_t address, int size, int clean, bool is_write_symbolic) {
 		mem_access_t record;
 
 		record.address = address;
 		record.size = size;
 		record.clean = clean;
+		record.is_symbolic = is_write_symbolic;
 		if (clean == -1) {
 			// all bytes are clean before this write, so the value
 			// is not important
@@ -718,9 +720,14 @@ public:
 		for (auto it = mem_writes.begin(); it != mem_writes.end(); it++) {
 			if (it->clean == -1) {
 				taint_t *bitmap = page_lookup(it->address);
-				memset(&bitmap[it->address & 0xFFFULL], TAINT_DIRTY, sizeof(taint_t) * it->size);
-				it->clean = (1 << it->size) - 1;
-				//LOG_D("commit: lazy initialize mem_write [%#lx, %#lx]", it->address, it->address + it->size);
+				if (it->is_symbolic) {
+					memset(&bitmap[it->address & 0xFFFULL], TAINT_SYMBOLIC, sizeof(taint_t) * it->size);
+				}
+				else {
+					memset(&bitmap[it->address & 0xFFFULL], TAINT_DIRTY, sizeof(taint_t) * it->size);
+					it->clean = (1 << it->size) - 1;
+					//LOG_D("commit: lazy initialize mem_write [%#lx, %#lx]", it->address, it->address + it->size);
+				}
 			}
 		}
 
@@ -841,11 +848,16 @@ public:
 
 		for (auto a = mem_writes.begin(); a != mem_writes.end(); a++)
 			if (a->clean == -1 && (a->address & ~0xFFFULL) == address) {
-				// initialize this memory access immediately so that the
-				// following memory read is valid.
-				//LOG_D("page_activate: lazy initialize mem_write [%#lx, %#lx]", a->address, a->address + a->size);
-				memset(&bitmap[a->address & 0xFFFULL], TAINT_DIRTY, sizeof(taint_t) * a->size);
-				a->clean = (1ULL << a->size) - 1;
+				if (a->is_symbolic) {
+					memset(&bitmap[a->address & 0xFFFULL], TAINT_SYMBOLIC, sizeof(taint_t) * a->size);
+				}
+				else {
+					// initialize this memory access immediately so that the
+					// following memory read is valid.
+					//LOG_D("page_activate: lazy initialize mem_write [%#lx, %#lx]", a->address, a->address + a->size);
+					memset(&bitmap[a->address & 0xFFFULL], TAINT_DIRTY, sizeof(taint_t) * a->size);
+					a->clean = (1ULL << a->size) - 1;
+				}
 			}
 	}
 
@@ -1095,7 +1107,7 @@ public:
 			} else {
 				clean = -1;
 			}
-			log_write(address, size, clean);
+			log_write(address, size, clean, is_dst_symbolic);
 		} else {
 			if (bitmap) {
 				clean = 0;
@@ -1111,7 +1123,7 @@ public:
 			} else {
 				clean = -1;
 			}
-			if (!log_write(address, 0x1000 - start, clean))
+			if (!log_write(address, 0x1000 - start, clean, is_dst_symbolic))
 				// uc is already stopped if any error happens
 				return ;
 
@@ -1130,7 +1142,7 @@ public:
 			} else {
 				clean = -1;
 			}
-			log_write(address - start + 0x1000, end + 1, clean);
+			log_write(address - start + 0x1000, end + 1, clean, is_dst_symbolic);
 		}
 	}
 
